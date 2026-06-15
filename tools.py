@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -34,7 +35,68 @@ def _get_groq_client():
     return Groq(api_key=api_key)
 
 
+# Model used for the LLM-backed tools. llama-3.3-70b-versatile is a current,
+# production-ready Groq model with good copy quality. Swap to
+# "llama-3.1-8b-instant" for lower latency/cost.
+MODEL = "llama-3.3-70b-versatile"
+
+
+def _chat(messages: list[dict], temperature: float, max_tokens: int = 400) -> str:
+    """Thin wrapper around a Groq chat completion. Returns the text content."""
+    client = _get_groq_client()
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content.strip()
+
+
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
+
+# Words that carry no search signal; dropped before keyword matching.
+_STOPWORDS = {
+    "a", "an", "the", "for", "in", "of", "with", "and", "or", "to", "i", "im",
+    "looking", "want", "wants", "need", "needs", "some", "something", "that",
+    "this", "my", "me", "you", "what", "whats", "how", "out", "there", "mostly",
+    "wear", "wears", "style", "styled", "it", "is", "are", "any", "find", "show",
+    "size", "under", "below", "around", "about", "please", "would", "like",
+}
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, split on non-alphanumerics, drop stopwords and pure numbers."""
+    raw = re.findall(r"[a-z0-9]+", text.lower())
+    return [t for t in raw if t not in _STOPWORDS and not t.isdigit()]
+
+
+def _score(listing: dict, keywords: list[str]) -> int:
+    """
+    Weighted keyword-overlap score. Matches in the title and style tags are
+    worth more than matches buried in the free-text description.
+    """
+    title = listing.get("title", "").lower()
+    desc = listing.get("description", "").lower()
+    category = listing.get("category", "").lower()
+    tags = " ".join(listing.get("style_tags", [])).lower()
+    colors = " ".join(listing.get("colors", [])).lower()
+    brand = (listing.get("brand") or "").lower()
+
+    score = 0
+    for kw in keywords:
+        if kw in tags:
+            score += 3
+        if kw in title:
+            score += 3
+        if kw in category:
+            score += 2
+        if kw in colors or kw in brand:
+            score += 1
+        if kw in desc:
+            score += 1
+    return score
+
 
 def search_listings(
     description: str,
@@ -69,69 +131,165 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    keywords = _tokenize(description)
+
+    results = []
+    for listing in listings:
+        # Hard filters first.
+        if max_price is not None and listing.get("price", 0) > max_price:
+            continue
+        if size is not None:
+            # Whole-token match (bounded by non-alphanumerics) so "M" matches
+            # "S/M" but "8" does NOT match "W28". Case-insensitive.
+            pattern = (r"(?<![A-Za-z0-9])"
+                       + re.escape(size.strip())
+                       + r"(?![A-Za-z0-9])")
+            if not re.search(pattern, str(listing.get("size", "")), re.IGNORECASE):
+                continue
+
+        # Relevance scoring. If the user gave no usable keywords (e.g. just a
+        # size/price filter), keep all listings that passed the hard filters.
+        if keywords:
+            s = _score(listing, keywords)
+            if s == 0:
+                continue
+        else:
+            s = 0
+        results.append((s, listing))
+
+    # Highest score first; cheaper price as the tiebreaker.
+    results.sort(key=lambda pair: (-pair[0], pair[1].get("price", 0)))
+    return [listing for _, listing in results]
 
 
-# ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
+# ── Tool 2: suggest_outfit ────────────────────────────────
+
+def _format_item(item: dict) -> str:
+    """One-line description of a listing, for use inside prompts."""
+    return (
+        f"{item.get('title', '(untitled)')} "
+        f"(category: {item.get('category', '')}, "
+        f"colors: {', '.join(item.get('colors', []))}, "
+        f"style: {', '.join(item.get('style_tags', []))}, "
+        f"${item.get('price', '?')}, on {item.get('platform', '')})"
+    )
+
+
+def _format_wardrobe(wardrobe: dict) -> str:
+    """Bulleted list of the user's wardrobe items, for use inside prompts."""
+    lines = []
+    for item in wardrobe.get("items", []):
+        tags = ", ".join(item.get("style_tags", []))
+        colors = ", ".join(item.get("colors", []))
+        note = f" (note: {item['notes']})" if item.get("notes") else ""
+        lines.append(
+            f"- {item.get('name', 'item')} [{item.get('category', '')}; "
+            f"colors: {colors}; style: {tags}]{note}"
+        )
+    return "\n".join(lines)
+
+
+def _build_outfit_messages(new_item: dict, wardrobe: dict) -> list[dict]:
+    """
+    Build the chat messages for suggest_outfit. Branches on whether the wardrobe
+    has items: specific named-piece combinations vs. general styling advice.
+    Kept separate from the API call so the branch logic is testable without a key.
+    """
+    item_desc = _format_item(new_item)
+    items = wardrobe.get("items", []) if wardrobe else []
+
+    if not items:
+        user_prompt = (
+            f"A shopper is considering this secondhand piece:\n{item_desc}\n\n"
+            "They haven't told us what's in their wardrobe. Suggest how to style "
+            "this piece: what kinds of items pair well, what vibe it suits, and "
+            "one or two outfit directions. Keep it short and practical."
+        )
+    else:
+        user_prompt = (
+            f"A shopper is considering this secondhand piece:\n{item_desc}\n\n"
+            f"Their wardrobe:\n{_format_wardrobe(wardrobe)}\n\n"
+            "Suggest 1-2 complete outfits that combine the new piece with SPECIFIC "
+            "named items from their wardrobe. Reference pieces by name. Keep it short."
+        )
+
+    return [
+        {"role": "system", "content": "You are a sharp, friendly thrift and "
+         "styling assistant. Be concrete and concise."},
+        {"role": "user", "content": user_prompt},
+    ]
+
 
 def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
-    Args:
-        new_item: A listing dict (the item the user is considering buying).
-        wardrobe: A wardrobe dict with an 'items' key containing a list of
-                  wardrobe item dicts. May be empty — handle this gracefully.
-
-    Returns:
-        A non-empty string with outfit suggestions.
-        If the wardrobe is empty, offer general styling advice for the item
-        rather than raising an exception or returning an empty string.
-
-    TODO:
-        1. Check whether wardrobe['items'] is empty.
-        2. If empty: call the LLM with a prompt for general styling ideas
-           (what kinds of items pair well, what vibe it suits, etc.).
-        3. If not empty: format the wardrobe items into a prompt and ask
-           the LLM to suggest specific outfit combinations using the new item
-           and named pieces from the wardrobe.
-        4. Return the LLM's response as a string.
-
-    Before writing code, fill in the Tool 2 section of planning.md.
+    Uses specific named wardrobe pieces when the wardrobe is non-empty; gives
+    general styling advice when it's empty. Always returns a non-empty string —
+    on an API error it returns a safe fallback instead of raising, so the agent
+    loop can continue.
     """
-    # Replace this with your implementation
-    return ""
+    messages = _build_outfit_messages(new_item, wardrobe)
+    try:
+        return _chat(messages, temperature=0.4)
+    except Exception as e:
+        return (
+            f"(Styling assistant temporarily unavailable: {e}) "
+            f"For now, {new_item.get('title', 'this piece')} works with neutral "
+            "basics and one contrasting layer."
+        )
 
 
-# ── Tool 3: create_fit_card ───────────────────────────────────────────────────
+# ── Tool 3: create_fit_card ────────────────────────────────
+
+def _build_fitcard_messages(outfit: str, new_item: dict) -> list[dict]:
+    """
+    Build the chat messages for create_fit_card. Separated from the API call so
+    the prompt can be inspected without a key. Assumes `outfit` is non-empty
+    (the empty-input guard lives in create_fit_card itself).
+    """
+    title = new_item.get("title", "this find")
+    price = new_item.get("price", "?")
+    platform = new_item.get("platform", "")
+
+    user_prompt = (
+        f"Write a 2-4 sentence caption for a thrifted-outfit post.\n\n"
+        f"Item: {title} (${price}, found on {platform})\n"
+        f"Outfit: {outfit}\n\n"
+        "Style: casual and authentic like a real OOTD post (not a product "
+        "description). Mention the item name, price, and platform naturally, once "
+        "each. Capture the vibe in specific terms. No hashtag walls."
+    )
+    return [
+        {"role": "system", "content": "You write fun, authentic outfit captions "
+         "for thrift finds."},
+        {"role": "user", "content": user_prompt},
+    ]
+
 
 def create_fit_card(outfit: str, new_item: dict) -> str:
     """
-    Generate a short, shareable outfit caption for the thrifted find.
+    Generate a short, casual, shareable OOTD caption for the thrifted find.
 
-    Args:
-        outfit:   The outfit suggestion string from suggest_outfit().
-        new_item: The listing dict for the thrifted item.
-
-    Returns:
-        A 2–4 sentence string usable as an Instagram/TikTok caption.
-        If outfit is empty or missing, return a descriptive error message
-        string — do NOT raise an exception.
-
-    The caption should:
-    - Feel casual and authentic (like a real OOTD post, not a product description)
-    - Mention the item name, price, and platform naturally (once each)
-    - Capture the outfit vibe in specific terms
-    - Sound different each time for different inputs (use higher LLM temperature)
-
-    TODO:
-        1. Guard against an empty or whitespace-only outfit string.
-        2. Build a prompt that gives the LLM the item details and the outfit,
-           and asks for a caption matching the style guidelines above.
-        3. Call the LLM and return the response.
-
-    Before writing code, fill in the Tool 3 section of planning.md.
+    Returns a descriptive error string (never raises) if `outfit` is empty or
+    whitespace-only. On an API error it returns a fallback caption assembled
+    from the item's own fields, so the user still gets something shareable.
+    Uses a high temperature (0.9) so captions vary across runs and inputs.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "Can't make a fit card without an outfit suggestion to base it on."
+
+    title = new_item.get("title", "this find")
+    price = new_item.get("price", "?")
+    platform = new_item.get("platform", "")
+
+    messages = _build_fitcard_messages(outfit, new_item)
+    try:
+        return _chat(messages, temperature=0.9)
+    except Exception as e:
+        return (
+            f"Just thrifted {title} for ${price} on {platform} and I'm obsessed. "
+            f"Styled it up and it's giving exactly what I wanted. "
+            f"(caption generator offline: {e})"
+        )
