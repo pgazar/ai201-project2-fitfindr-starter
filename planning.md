@@ -41,7 +41,9 @@ good/fair), `price` (float), `colors` (list[str]), `brand` (str | None), `platfo
 It never raises — "no match" is represented by an empty list. When the exact search is empty
 the agent does **not** give up immediately: it retries with loosened constraints (drop the size
 filter, then the price limit, then both — only relaxations that actually change the query) and
-uses the first retry that returns hits, recording what it adjusted in `session["relaxed"]`. Only
+uses the first retry whose results still match the query's item type (its head noun, e.g. "boots"
+in "black combat boots") — so relaxing changes the size/price but never the *kind* of item —
+recording what it adjusted in `session["relaxed"]`. Only
 if every relaxation is still empty does it set `session["error"]` and return early **without**
 calling `suggest_outfit` or `create_fit_card`. It never blindly re-runs the *same* constraints
 — each retry drops a filter, so it can actually return something new. On a non-empty list (exact
@@ -130,8 +132,9 @@ exactly one branch point: whether the search returned anything.
    parsed["max_price"])`.
    - **Branch A — `len(results) == 0` (retry, then maybe stop):** before giving up, retry with
      loosened constraints via `_fallback_attempts(parsed)` — drop the size filter, then the price
-     limit, then both (only relaxations that change the query). Use the first retry that returns
-     hits, set `session["relaxed"]` to a note describing what was adjusted, and fall through to
+     limit, then both (only relaxations that change the query). Use the first retry whose results still match the
+     query's item type (its head noun, e.g. "boots") — so relaxing never changes the *kind* of
+     item — set `session["relaxed"]` to a note describing what was adjusted, and fall through to
      Branch B with those results. If every relaxation is still empty, set `session["error"]` and
      `return session` immediately — do **not** call `suggest_outfit` or `create_fit_card`.
    - **Branch B — results found (exact or relaxed):** store them in `session["search_results"]`,
@@ -184,7 +187,7 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No exact match | `run_agent` retries with loosened constraints (drop size, then price, then both) and uses the first retry with hits, setting `session["relaxed"]` to a note like *"No exact match for 'vintage graphic tee', so I removed the size filter (size XS) and found these instead."* The UI prepends that note to the listing panel. |
+| search_listings | No exact match | `run_agent` retries with loosened constraints (drop size, then price, then both) and uses the first retry whose results still match the query's item type (head noun) — so a "black combat boots" search relaxes into other boots, never black shorts. It sets `session["relaxed"]` to a note like *"No exact match for 'black combat boots', so I removed the $40 price limit and found these instead."* The UI prepends that note to the listing panel. |
 | search_listings | No match even after loosening | `run_agent` sets `session["error"]` — e.g. *"No listings matched 'designer ballgown' (size XXS, under $5), even after loosening the filters. Try different keywords."* — and returns early, skipping both LLM tools. The UI shows it in panel 1; panels 2 and 3 stay empty. |
 | suggest_outfit | Wardrobe is empty (`items == []`) | Instead of failing, the tool detects the empty wardrobe and asks the LLM for *general* styling guidance for the item, returning advice the user can act on — e.g. *"This tee leans casual-streetwear; pair it with high-waisted denim and chunky boots, and try an oversized flannel layered over it."* The loop continues normally to the fit card. |
 | suggest_outfit | Groq API error (missing key / rate limit / network) | The exception is caught. The tool returns a non-empty fallback that still names the item and gives a usable pairing — e.g. *"Styling assistant is temporarily unavailable — for now, this piece works with neutral basics and one contrasting layer."* — so the loop still reaches `create_fit_card`. |

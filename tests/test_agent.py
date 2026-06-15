@@ -134,3 +134,36 @@ def test_size_relaxation_note_wording(monkeypatch):
     _stub_llm(monkeypatch)
     s = run_agent("vintage graphic tee size XS", get_example_wardrobe())
     assert "removed the size filter" in s["relaxed"]
+
+
+# ─────────────── relaxation preserves item type (regression) ───────────────
+
+from agent import _head_noun, _is_on_type
+
+
+def test_head_noun_is_last_content_token():
+    assert _head_noun("black combat boots") == "boots"
+    assert _head_noun("vintage graphic tee") == "tee"
+    assert _head_noun("") is None
+
+
+def test_is_on_type_matches_type_fields_only():
+    boots = {"title": "Suede Chelsea Boots — Tan", "style_tags": ["boots"], "category": "shoes"}
+    shorts = {"title": "Biker Shorts — Black, Shiny", "style_tags": ["y2k"], "category": "bottoms"}
+    assert _is_on_type(boots, "boots") is True
+    assert _is_on_type(shorts, "boots") is False
+
+
+def test_relaxation_preserves_item_type_boots(monkeypatch):
+    # Regression: "black combat boots" must not relax into black shorts/tops.
+    # The only boots are over $40, so the agent should drop the PRICE (not size)
+    # and return a shoes item — never a bottoms/tops item.
+    _stub_llm(monkeypatch)
+    s = run_agent("black combat boots size 8, UNDER $40", get_example_wardrobe())
+    assert s["error"] is None
+    assert s["relaxed"] is not None
+    assert "price" in s["relaxed"].lower()
+    assert s["selected_item"]["category"] == "shoes"
+    assert "boot" in s["selected_item"]["title"].lower()
+    # no off-type items leaked into the results
+    assert all(it["category"] == "shoes" for it in s["search_results"])

@@ -20,7 +20,7 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, _tokenize
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -123,6 +123,21 @@ def _fallback_attempts(parsed: dict) -> list[tuple]:
     if size is not None and price is not None:
         attempts.append(("removed both the size and price filters", None, None))
     return attempts
+def _head_noun(description: str) -> str | None:
+    """The item-type keyword to preserve through relaxation: the last content
+    token of the description (e.g. "boots" in "black combat boots")."""
+    tokens = _tokenize(description)
+    return tokens[-1] if tokens else None
+
+
+def _is_on_type(listing: dict, head_kw: str) -> bool:
+    """True if the listing's type fields (title / style_tags / category) contain head_kw."""
+    blob = (
+        listing.get("title", "") + " "
+        + " ".join(listing.get("style_tags", [])) + " "
+        + listing.get("category", "")
+    ).lower()
+    return head_kw in blob
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -189,8 +204,13 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     # Stretch: if the exact search is empty, retry with loosened constraints
     # before giving up, and record what was adjusted.
     if not results:
+        head_kw = _head_noun(parsed["description"])
         for note, size, price in _fallback_attempts(parsed):
             retry = search_listings(parsed["description"], size, price)
+            # Keep the item type intact: don't surface a different KIND of item
+            # just because it shares an incidental keyword (e.g. a color).
+            if head_kw:
+                retry = [it for it in retry if _is_on_type(it, head_kw)]
             if retry:
                 results = retry
                 session["relaxed"] = (
