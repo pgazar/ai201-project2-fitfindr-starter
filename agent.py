@@ -20,7 +20,13 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card, _tokenize
+from tools import (
+    search_listings,
+    suggest_outfit,
+    create_fit_card,
+    find_similar_listings,
+    _tokenize,
+)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -45,6 +51,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
         "relaxed": None,             # note if constraints were loosened on retry
+        "similar_listings": [],      # "you might also like" alternatives
     }
 
 
@@ -248,7 +255,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         session["outfit_suggestion"], session["selected_item"]
     )
 
-    # Step 7: done
+    # Step 7: find similar listings ("you might also like") — deterministic, no LLM
+    session["similar_listings"] = find_similar_listings(session["selected_item"])
+
+    # Step 8: done
     return session
 
 

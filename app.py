@@ -20,7 +20,7 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
@@ -45,7 +45,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     """
     # 1. Guard against an empty query.
     if not user_query or not user_query.strip():
-        return "Please describe what you're looking for.", "", ""
+        return "Please describe what you're looking for.", "", "", ""
 
     # 2. Select the wardrobe based on the radio choice.
     if wardrobe_choice == "Empty wardrobe (new user)":
@@ -58,7 +58,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     # 4. Early-exit path: show the error in panel 1, leave the others empty.
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", ""
 
     # 5. Success: format the selected listing and map the session to 3 panels.
     item = session["selected_item"]
@@ -72,7 +72,22 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"brand: {item['brand'] or 'unbranded'}  ·  on {item['platform']}\n\n"
         f"{item['description']}"
     )
-    return note + listing_text, session["outfit_suggestion"], session["fit_card"]
+    # "You might also like" alternatives from Tool 4.
+    similar = session["similar_listings"]
+    if similar:
+        similar_text = "\n".join(
+            f"• {x['title']} — ${x['price']:g}  ({x['category']}, on {x['platform']})"
+            for x in similar
+        )
+    else:
+        similar_text = "No similar items found."
+
+    return (
+        note + listing_text,
+        session["outfit_suggestion"],
+        session["fit_card"],
+        similar_text,
+    )
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -125,6 +140,11 @@ Describe what you're looking for — include size and price if you want to filte
                 lines=8,
                 interactive=False,
             )
+            similar_output = gr.Textbox(
+                label="🔁 You might also like",
+                lines=8,
+                interactive=False,
+            )
 
         gr.Examples(
             examples=[[q, "Example wardrobe"] for q in EXAMPLE_QUERIES],
@@ -135,12 +155,12 @@ Describe what you're looking for — include size and price if you want to filte
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, similar_output],
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, similar_output],
         )
 
     return demo

@@ -167,3 +167,19 @@ def test_relaxation_preserves_item_type_boots(monkeypatch):
     assert "boot" in s["selected_item"]["title"].lower()
     # no off-type items leaked into the results
     assert all(it["category"] == "shoes" for it in s["search_results"])
+
+
+# ─────────────── Tool 4 integration: similar_listings ───────────────
+
+def test_similar_listings_populated_on_happy_path(monkeypatch):
+    _stub_llm(monkeypatch)
+    s = run_agent("vintage graphic tee under $30", get_example_wardrobe())
+    assert isinstance(s["similar_listings"], list)
+    assert len(s["similar_listings"]) > 0
+    assert s["selected_item"]["id"] not in [x["id"] for x in s["similar_listings"]]
+
+
+def test_similar_listings_empty_on_no_results(monkeypatch):
+    _stub_llm(monkeypatch)
+    s = run_agent("designer ballgown size XXS under $5", get_example_wardrobe())
+    assert s["similar_listings"] == []

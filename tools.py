@@ -293,3 +293,42 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
             f"Styled it up and it's giving exactly what I wanted. "
             f"(caption generator offline: {e})"
         )
+
+
+# ── Tool 4: find_similar_listings (extended) ──────────────────────────────────
+
+def find_similar_listings(new_item: dict, limit: int = 3) -> list[dict]:
+    """
+    Find other listings similar to `new_item` — a "you might also like" tool.
+    Deterministic (no LLM): scores every other listing by shared category, shared
+    style tags, and shared colors, excludes the item itself, and returns the top
+    matches.
+
+    Args:
+        new_item: the selected listing dict.
+        limit:    max number of similar listings to return (default 3).
+
+    Returns:
+        A list of up to `limit` listing dicts, most similar first (cheaper price as
+        the tiebreaker). Returns [] if nothing shares any signal with new_item.
+    """
+    listings = load_listings()
+    item_id = new_item.get("id")
+    item_cat = new_item.get("category", "")
+    item_tags = {t.lower() for t in new_item.get("style_tags", [])}
+    item_colors = {c.lower() for c in new_item.get("colors", [])}
+
+    scored = []
+    for other in listings:
+        if other.get("id") == item_id:
+            continue  # never suggest the item itself
+        score = 0
+        if item_cat and other.get("category") == item_cat:
+            score += 3
+        score += 2 * len(item_tags & {t.lower() for t in other.get("style_tags", [])})
+        score += len(item_colors & {c.lower() for c in other.get("colors", [])})
+        if score > 0:
+            scored.append((score, other))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1].get("price", 0)))
+    return [listing for _, listing in scored[:limit]]

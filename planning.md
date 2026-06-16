@@ -104,11 +104,25 @@ item's `title`, `price`, and `platform`.
 
 ---
 
-### Additional Tools (if any)
+### Tool 4: find_similar_listings (extended)
 
-None for the core build. Possible stretch tools: a `parse_query` tool to extract
-size/price/keywords via the LLM instead of regex, or a `rank_results` tool that re-ranks
-search hits against the wardrobe.
+**What it does:**
+A "you might also like" tool. Given the selected listing, it finds other listings in the
+dataset that are similar to it. Deterministic — no LLM. Runs after the fit card as an extra.
+
+**Input parameters:**
+- `new_item` (`dict`, required): the selected listing dict.
+- `limit` (`int`, default `3`): max number of similar listings to return.
+
+**What it returns:**
+A `list[dict]` of up to `limit` listings, scored by shared category (+3), shared style tags
+(+2 each), and shared colors (+1 each), excluding the item itself, sorted most-similar first
+(cheaper price as a tiebreaker). Returns `[]` if nothing shares any signal.
+
+**What happens if it fails or returns nothing:**
+It never raises. If nothing is similar it returns `[]` and the UI shows "No similar items
+found." It runs only on the success path (after a listing is selected), so on a no-results run
+it is never called and `session["similar_listings"]` stays `[]`.
 
 ---
 
@@ -148,7 +162,11 @@ exactly one branch point: whether the search returned anything.
 5. **Call create_fit_card.** `session["fit_card"] =
    create_fit_card(session["outfit_suggestion"], session["selected_item"])`.
 
-6. **Return.** `return session`. The interaction is "done" when `fit_card` is set, or earlier
+6. **Call find_similar_listings.** `session["similar_listings"] =
+   find_similar_listings(session["selected_item"])` — deterministic "you might also like"
+   alternatives, shown in the UI's fourth panel. Skipped on the no-results path.
+
+7. **Return.** `return session`. The interaction is "done" when `fit_card` is set, or earlier
    if Branch A set `error`. The caller checks `session["error"]` first: if it is not `None`,
    the run ended early and the other output fields are still `None`.
 
@@ -173,6 +191,7 @@ needs and writes its output back into the same dict:
 | `fit_card` | `create_fit_card` | the UI |
 | `error` | search step (only if all retries fail) | every later step / the UI (short-circuits output) |
 | `relaxed` | search step (on a successful retry) | the UI (note prepended to the listing panel) |
+| `similar_listings` | find_similar_listings step | the UI (fourth "you might also like" panel) |
 
 There is no global state; one fresh `session` per call to `run_agent`. After the loop returns,
 `app.handle_query` reads the finished session and maps `selected_item` / `outfit_suggestion` /
@@ -193,6 +212,7 @@ For each tool, describe the specific failure mode you're handling and what the a
 | suggest_outfit | Groq API error (missing key / rate limit / network) | The exception is caught. The tool returns a non-empty fallback that still names the item and gives a usable pairing — e.g. *"Styling assistant is temporarily unavailable — for now, this piece works with neutral basics and one contrasting layer."* — so the loop still reaches `create_fit_card`. |
 | create_fit_card | Outfit input is missing or incomplete (empty/whitespace) | The tool returns a clear, non-caption message rather than inventing one: *"Can't make a fit card without an outfit suggestion to base it on."* (Guards a bad hand-off; on the normal path `suggest_outfit` always returns text, so this should not fire.) |
 | create_fit_card | Groq API error | The exception is caught and the tool returns a templated caption built from the item's own fields, so the user still gets something shareable — e.g. *"Just thrifted the 2003 Tour Bootleg Tee for $24 on depop and I'm obsessed — styled it up and it's giving exactly what I wanted."* |
+| find_similar_listings | Nothing similar in the dataset | Returns `[]` (never raises); the UI shows "No similar items found." Runs only after a listing is selected, so it is skipped entirely on a no-results run. |
 
 ---
 
@@ -247,7 +267,7 @@ Planning Loop (run_agent) ──────────────────
             return session
                 │
                 ▼
-  UI panels:  [1] listing details (+ relaxed note)   [2] outfit idea   [3] fit card
+  UI panels:  [1] listing (+relaxed note)  [2] outfit idea  [3] fit card  [4] you might also like
               (on early exit: error message in [1]; [2] and [3] stay empty)
 ```
 

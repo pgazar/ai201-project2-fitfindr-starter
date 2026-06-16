@@ -138,3 +138,37 @@ def test_create_fit_card_api_error_returns_fallback(monkeypatch):
     out = create_fit_card("a real outfit", SAMPLE_ITEM)
     assert isinstance(out, str) and len(out) > 0
     assert SAMPLE_ITEM["title"] in out
+
+
+# ─────────────── Tool 4: find_similar_listings (deterministic) ───────────────
+
+from tools import find_similar_listings
+
+
+def test_find_similar_returns_list_excluding_self():
+    sim = find_similar_listings(SAMPLE_ITEM)
+    assert isinstance(sim, list)
+    assert all(s["id"] != SAMPLE_ITEM["id"] for s in sim)
+
+
+def test_find_similar_respects_limit():
+    assert len(find_similar_listings(SAMPLE_ITEM, limit=2)) <= 2
+
+
+def test_find_similar_shares_a_signal():
+    seed_cat = SAMPLE_ITEM["category"]
+    seed_tags = {t.lower() for t in SAMPLE_ITEM["style_tags"]}
+    seed_colors = {c.lower() for c in SAMPLE_ITEM["colors"]}
+    for s in find_similar_listings(SAMPLE_ITEM):
+        shares = (
+            s["category"] == seed_cat
+            or bool(seed_tags & {t.lower() for t in s["style_tags"]})
+            or bool(seed_colors & {c.lower() for c in s["colors"]})
+        )
+        assert shares
+
+
+def test_find_similar_empty_when_nothing_matches():
+    alien = {"id": "zzz-none", "category": "spacesuit",
+             "style_tags": ["martian"], "colors": ["ultraviolet"]}
+    assert find_similar_listings(alien) == []
